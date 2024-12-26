@@ -1,8 +1,10 @@
+import 'dart:convert';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:location/location.dart';
+import 'package:http/http.dart' as http;
 import '../services/trajet_service.dart'; // Adjust the path as needed
 import '../models/trajet.dart'; // Adjust the path as needed
 
@@ -51,9 +53,10 @@ class MapWidget extends StatefulWidget {
 class _MapWidgetState extends State<MapWidget> {
   late Future<List<Trajet>> trajets;
   Location location = Location();
-  late LocationData _currentLocation;
+  LocationData? _currentLocation;
   late MapController _mapController;
-  bool _isLocationInitialized = false; // Track if location is initialized
+  bool _isLocationInitialized = false;
+  List<Polyline> polylines = [];
 
   @override
   void initState() {
@@ -63,6 +66,7 @@ class _MapWidgetState extends State<MapWidget> {
     _initializeLocation();
   }
 
+  // Initialize the location service
   Future<void> _initializeLocation() async {
     bool serviceEnabled = await location.serviceEnabled();
     if (!serviceEnabled) {
@@ -80,21 +84,39 @@ class _MapWidgetState extends State<MapWidget> {
       }
     }
 
+    // Get the current location data
     _currentLocation = await location.getLocation();
     setState(() {
-      _isLocationInitialized = true; // Location is initialized
+      _isLocationInitialized = true;
     });
-
-    // Move camera to the current location after it's initialized
     _moveCameraToCurrentLocation();
   }
 
+  // Move camera to the current location
   Future<void> _moveCameraToCurrentLocation() async {
-    if (_isLocationInitialized && _mapController != null) {
+    if (_isLocationInitialized && _currentLocation != null) {
       _mapController.move(
-        LatLng(_currentLocation.latitude!, _currentLocation.longitude!),
-        14.0, // Zoom level
+        LatLng(_currentLocation!.latitude!, _currentLocation!.longitude!),
+        14.0,
       );
+    }
+  }
+
+  // Function to get the route and distance between two points using OpenRouteService
+  Future<Map<String, dynamic>> getRoute(LatLng start, LatLng end) async {
+    final apiKey = '5b3ce3597851110001cf6248a46fc7595ee94509880b177cdbbea008'; // Replace with your OpenRouteService API key
+    final url =
+        'https://api.openrouteservice.org/v2/directions/driving-car?api_key=$apiKey&start=${start.longitude},${start.latitude}&end=${end.longitude},${end.latitude}';
+    
+    final response = await http.get(Uri.parse(url));
+    
+    if (response.statusCode == 200) {
+      final data = json.decode(response.body);
+      final route = data['features'][0]['geometry']['coordinates'] as List;
+      final distance = data['features'][0]['properties']['segments'][0]['distance'];
+      return {'route': route, 'distance': distance};
+    } else {
+      throw Exception('Failed to load route');
     }
   }
 
@@ -110,12 +132,9 @@ class _MapWidgetState extends State<MapWidget> {
         } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
           return const Center(child: Text('No trajets found.'));
         } else {
-          // Create markers and polylines for routes
           final markers = <Marker>[];
-          final polylines = <Polyline>[];
 
           for (final trajet in snapshot.data!) {
-            // Add markers for depart and arrivee
             final departPoint = LatLng(
               trajet.pointDepart?['latitude'] ?? 0.0,
               trajet.pointDepart?['longitude'] ?? 0.0,
@@ -142,20 +161,28 @@ class _MapWidgetState extends State<MapWidget> {
               ),
             ]);
 
-            // Add polyline directly between depart and arrivee
-            polylines.add(
-              Polyline(
-                points: [departPoint, arriveePoint],
-                color: Colors.blue,
-                strokeWidth: 4.0,
-              ),
-            );
+            // Get the route and distance and update the map
+            getRoute(departPoint, arriveePoint).then((routeData) {
+              final route = routeData['route'] as List;
+              final distance = routeData['distance'];
+              print('Distance: $distance meters');
+
+              // Add the polyline for the route
+              setState(() {
+                final polyline = Polyline(
+                  points: route.map((coord) => LatLng(coord[1], coord[0])).toList(),
+                  color: Colors.blue,
+                  strokeWidth: 4.0,
+                );
+                polylines.add(polyline); // Add the polyline to the list
+              });
+            });
           }
 
           return FlutterMap(
             options: MapOptions(
-              center: _isLocationInitialized
-                  ? LatLng(_currentLocation.latitude!, _currentLocation.longitude!)
+              center: _isLocationInitialized && _currentLocation != null
+                  ? LatLng(_currentLocation!.latitude!, _currentLocation!.longitude!)
                   : LatLng(31.6295, -7.9811), // Default location if not initialized
               zoom: 12.0,
               minZoom: 5.0,
@@ -166,31 +193,14 @@ class _MapWidgetState extends State<MapWidget> {
               TileLayer(
                 urlTemplate: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
                 subdomains: ['a', 'b', 'c'],
-                userAgentPackageName: 'com.example.your_app',
                 additionalOptions: {
                   'attribution': '© OpenStreetMap contributors',
                 },
               ),
-              PolylineLayer(polylines: polylines),
               MarkerLayer(markers: markers),
-              MarkerLayer(
-                markers: [
-                  Marker(
-                    point: LatLng(
-                      _currentLocation.latitude ?? 31.6295,
-                      _currentLocation.longitude ?? -7.9811,
-                    ),
-                    width: 80,
-                    height: 80,
-                    builder: (ctx) => const Icon(
-                      Icons.location_on,
-                      color: Colors.blue,
-                    ),
-                  ),
-                ],
-              ),
+              PolylineLayer(polylines: polylines), // Add polylines to the layer
             ],
-            mapController: _mapController, // Directly use the initialized controller
+            mapController: _mapController,
           );
         }
       },
